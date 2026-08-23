@@ -38,7 +38,6 @@ import ru.dark.encryptcontainer.ComposeBuilder
 import ru.dark.encryptcontainer.MainActivity
 import ru.dark.encryptcontainer.crypto.CryptoManager
 import ru.dark.encryptcontainer.crypto.CryptoUtils
-import ru.dark.encryptcontainer.crypto.json.EncryptOutput
 
 object KeysScreen: ComposeBuilder() {
     @Composable
