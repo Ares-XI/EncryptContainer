@@ -63,7 +63,7 @@ object KeysScreen: ComposeBuilder() {
                         rsaAllPairsFieldValue = it
                     },
                     label = {
-                        Text("Пары RSA: ", color = Color.Gray, fontSize = 16.sp)
+                        Text("Публичные ключи: ", color = Color.Gray, fontSize = 16.sp)
                     }
                 )
 
@@ -87,7 +87,7 @@ object KeysScreen: ComposeBuilder() {
                         }
                     }
                 ) {
-                    if(!isBlocked) Text("Получить пары RSA", color = buttonTextColor, fontSize = 24.sp)
+                    if(!isBlocked) Text("Получить ключи", color = buttonTextColor, fontSize = 24.sp)
                     else Text("Получаю...", color = buttonTextColor, fontSize = 24.sp)
                 }
 
@@ -101,7 +101,7 @@ object KeysScreen: ComposeBuilder() {
                     onValueChange = {},
                     colors = OutlinedTextFieldDefaults.colors(),
                     label = {
-                        Text("Новая пара RSA: ", color = Color.Gray, fontSize = 16.sp)
+                        Text("Новая пара ключей: ", color = Color.Gray, fontSize = 16.sp)
                     }
                 )
 
@@ -120,7 +120,7 @@ object KeysScreen: ComposeBuilder() {
                         }
                     }
                 ) {
-                    if(!isBlocked) Text("Новая пара RSA", color = buttonTextColor, fontSize = 24.sp)
+                    if(!isBlocked) Text("Новая пара ключей", color = buttonTextColor, fontSize = 24.sp)
                     else Text("Генерирую...", color = buttonTextColor, fontSize = 24.sp)
                 }
 
@@ -149,7 +149,7 @@ object KeysScreen: ComposeBuilder() {
                         }
                     }
                 ) {
-                    if(!isBlocked) Text("Копировать ключ RSA", color = buttonTextColor, fontSize = 24.sp)
+                    if(!isBlocked) Text("Копировать публ. ключ", color = buttonTextColor, fontSize = 24.sp)
                     else Text("Копирую...", color = buttonTextColor, fontSize = 24.sp)
                 }
             }

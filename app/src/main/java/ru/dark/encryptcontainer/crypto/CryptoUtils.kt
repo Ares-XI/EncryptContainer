@@ -8,7 +8,12 @@ import java.security.SecureRandom
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import android.util.Base64
+import java.security.MessageDigest
+import java.security.interfaces.ECPrivateKey
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
 import javax.crypto.Cipher
+import javax.crypto.KeyAgreement
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
@@ -22,38 +27,130 @@ object CryptoUtils {
     }
 
     fun generateKeyPair(): Pair<String, String> {
-        val generator = KeyPairGenerator.getInstance("RSA")
-        generator.initialize(2048)
+        val generator = KeyPairGenerator.getInstance("EC")
+        generator.initialize(ECGenParameterSpec("secp256r1"))
         val keyPair = generator.generateKeyPair()
-
         val publicKey = Base64.encodeToString(keyPair.public.encoded, Base64.DEFAULT)
         val privateKey = Base64.encodeToString(keyPair.private.encoded, Base64.DEFAULT)
         return Pair(publicKey, privateKey)
     }
 
-     fun encrypt(publicKeyStr: String, message: String): Pair<String, String> {
-        val publicKey = stringToPublicKey(publicKeyStr.replace(" ", "").replace("\n", ""))
+    fun encrypt(publicKeyStr: String, message: String): Pair<String, String> {
+        val publicKey = stringToECPublicKey(publicKeyStr.replace(" ", "").replace("\n", ""))
         val aesKey = generateAESKey()
         val (iv, encryptedMessage) = encryptAES(message.toByteArray(Charsets.UTF_8), aesKey)
-        val encryptedAESKey = encryptRSA(aesKey.encoded, publicKey)
+        val encryptedAESKey = encryptAESKeyWithECDH(aesKey.encoded, publicKey)
         val aesKeyBase64 = Base64.encodeToString(encryptedAESKey, Base64.DEFAULT)
         val messageBase64 = Base64.encodeToString(iv + encryptedMessage, Base64.DEFAULT)
         return Pair(aesKeyBase64, messageBase64)
     }
 
     fun decrypt(privateKeyStr: String, encryptedAESKeyStr: String, encryptedMessageStr: String): String {
-        val privateKey = stringToPrivateKey(privateKeyStr.replace(" ", "").replace("\n", ""))
+        val privateKey = stringToECPrivateKey(privateKeyStr.replace(" ", "").replace("\n", ""))
         val encryptedAESKey = Base64.decode(encryptedAESKeyStr.replace(" ", "").replace("\n", ""), Base64.DEFAULT)
-        val aesKeyBytes = decryptRSA(encryptedAESKey, privateKey)
+        val aesKeyBytes = decryptAESKeyWithECDH(encryptedAESKey, privateKey)
         val aesKey = SecretKeySpec(aesKeyBytes, "AES")
-
         val fullMessage = Base64.decode(encryptedMessageStr, Base64.DEFAULT)
         val iv = fullMessage.copyOfRange(0, 12)
         val encryptedMessage = fullMessage.copyOfRange(12, fullMessage.size)
-
         val decryptedBytes = decryptAES(encryptedMessage, iv, aesKey)
         return String(decryptedBytes, Charsets.UTF_8)
     }
+
+    // ============= ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ДЛЯ ECC =============
+
+    private fun encryptAESKeyWithECDH(aesKeyBytes: ByteArray, publicKey: ECPublicKey): ByteArray {
+        // 1. Генерируем эфемерную ECC-пару
+        val ephemeralGen = KeyPairGenerator.getInstance("EC")
+        ephemeralGen.initialize(ECGenParameterSpec("secp256r1"))
+        val ephemeralPair = ephemeralGen.generateKeyPair()
+
+        // 2. Вычисляем общий секрет через ECDH
+        val keyAgreement = KeyAgreement.getInstance("ECDH")
+        keyAgreement.init(ephemeralPair.private)
+        keyAgreement.doPhase(publicKey, true)
+        val sharedSecret = keyAgreement.generateSecret()
+
+        // 3. Из секрета делаем ключ для шифрования AES-ключа
+        val derivedKey = MessageDigest.getInstance("SHA-256").digest(sharedSecret)
+        val secretKey = SecretKeySpec(derivedKey, "AES")
+
+        // 4. Шифруем AES-ключ через AES-GCM (да, ещё один слой!)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val iv = ByteArray(12)
+        SecureRandom().nextBytes(iv)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
+        val encryptedKey = cipher.doFinal(aesKeyBytes)
+
+        // 5. Склеиваем: [Эфемерный публичный ключ] + [IV] + [Зашифрованный AES-ключ]
+        val ephemeralPub = ephemeralPair.public.encoded
+        return ephemeralPub + iv + encryptedKey
+    }
+
+    private fun decryptAESKeyWithECDH(encryptedData: ByteArray, privateKey: ECPrivateKey): ByteArray {
+        val ephemeralPubLen = 91
+        val ephemeralPubEncoded = encryptedData.copyOfRange(0, ephemeralPubLen)
+        val ephemeralPublic = stringToECPublicKey(Base64.encodeToString(ephemeralPubEncoded, Base64.NO_WRAP))
+        val iv = encryptedData.copyOfRange(ephemeralPubLen, ephemeralPubLen + 12)
+        val encryptedAESKey = encryptedData.copyOfRange(ephemeralPubLen + 12, encryptedData.size)
+        val keyAgreement = KeyAgreement.getInstance("ECDH")
+        keyAgreement.init(privateKey)
+        keyAgreement.doPhase(ephemeralPublic, true)
+        val sharedSecret = keyAgreement.generateSecret()
+        val derivedKey = MessageDigest.getInstance("SHA-256").digest(sharedSecret)
+        val secretKey = SecretKeySpec(derivedKey, "AES")
+
+        // 5. Расшифровываем AES-ключ
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
+        return cipher.doFinal(encryptedAESKey)
+    }
+
+    private fun stringToECPublicKey(key: String): ECPublicKey {
+        val keyBytes = Base64.decode(key, Base64.DEFAULT)
+        val spec = X509EncodedKeySpec(keyBytes)
+        return KeyFactory.getInstance("EC").generatePublic(spec) as ECPublicKey
+    }
+
+    private fun stringToECPrivateKey(key: String): ECPrivateKey {
+        val keyBytes = Base64.decode(key, Base64.DEFAULT)
+        val spec = PKCS8EncodedKeySpec(keyBytes)
+        return KeyFactory.getInstance("EC").generatePrivate(spec) as ECPrivateKey
+    }
+
+//    fun generateKeyPair(): Pair<String, String> {
+//        val generator = KeyPairGenerator.getInstance("RSA")
+//        generator.initialize(2048)
+//        val keyPair = generator.generateKeyPair()
+//
+//        val publicKey = Base64.encodeToString(keyPair.public.encoded, Base64.DEFAULT)
+//        val privateKey = Base64.encodeToString(keyPair.private.encoded, Base64.DEFAULT)
+//        return Pair(publicKey, privateKey)
+//    }
+//
+//     fun encrypt(publicKeyStr: String, message: String): Pair<String, String> {
+//        val publicKey = stringToPublicKey(publicKeyStr.replace(" ", "").replace("\n", ""))
+//        val aesKey = generateAESKey()
+//        val (iv, encryptedMessage) = encryptAES(message.toByteArray(Charsets.UTF_8), aesKey)
+//        val encryptedAESKey = encryptRSA(aesKey.encoded, publicKey)
+//        val aesKeyBase64 = Base64.encodeToString(encryptedAESKey, Base64.DEFAULT)
+//        val messageBase64 = Base64.encodeToString(iv + encryptedMessage, Base64.DEFAULT)
+//        return Pair(aesKeyBase64, messageBase64)
+//    }
+//
+//    fun decrypt(privateKeyStr: String, encryptedAESKeyStr: String, encryptedMessageStr: String): String {
+//        val privateKey = stringToPrivateKey(privateKeyStr.replace(" ", "").replace("\n", ""))
+//        val encryptedAESKey = Base64.decode(encryptedAESKeyStr.replace(" ", "").replace("\n", ""), Base64.DEFAULT)
+//        val aesKeyBytes = decryptRSA(encryptedAESKey, privateKey)
+//        val aesKey = SecretKeySpec(aesKeyBytes, "AES")
+//
+//        val fullMessage = Base64.decode(encryptedMessageStr, Base64.DEFAULT)
+//        val iv = fullMessage.copyOfRange(0, 12)
+//        val encryptedMessage = fullMessage.copyOfRange(12, fullMessage.size)
+//
+//        val decryptedBytes = decryptAES(encryptedMessage, iv, aesKey)
+//        return String(decryptedBytes, Charsets.UTF_8)
+//    }
 
     fun encryptFile(plainText: String, password: String): String {
         val salt = ByteArray(16)
@@ -90,17 +187,17 @@ object CryptoUtils {
         return SecretKeySpec(derivedKey.encoded, "AES")
     }
 
-    private fun stringToPublicKey(key: String): PublicKey {
-        val keyBytes = Base64.decode(key, Base64.DEFAULT)
-        val spec = X509EncodedKeySpec(keyBytes)
-        return KeyFactory.getInstance("RSA").generatePublic(spec)
-    }
-
-    private fun stringToPrivateKey(key: String): PrivateKey {
-        val keyBytes = Base64.decode(key, Base64.DEFAULT)
-        val spec = PKCS8EncodedKeySpec(keyBytes)
-        return KeyFactory.getInstance("RSA").generatePrivate(spec)
-    }
+//    private fun stringToPublicKey(key: String): PublicKey {
+//        val keyBytes = Base64.decode(key, Base64.DEFAULT)
+//        val spec = X509EncodedKeySpec(keyBytes)
+//        return KeyFactory.getInstance("RSA").generatePublic(spec)
+//    }
+//
+//    private fun stringToPrivateKey(key: String): PrivateKey {
+//        val keyBytes = Base64.decode(key, Base64.DEFAULT)
+//        val spec = PKCS8EncodedKeySpec(keyBytes)
+//        return KeyFactory.getInstance("RSA").generatePrivate(spec)
+//    }
 
     private fun generateAESKey(): SecretKey {
         val generator = KeyGenerator.getInstance("AES")
@@ -123,15 +220,15 @@ object CryptoUtils {
         return cipher.doFinal(encryptedData)
     }
 
-    private fun encryptRSA(data: ByteArray, key: PublicKey): ByteArray {
-        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
-        cipher.init(Cipher.ENCRYPT_MODE, key)
-        return cipher.doFinal(data)
-    }
-
-    private fun decryptRSA(data: ByteArray, key: PrivateKey): ByteArray {
-        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
-        cipher.init(Cipher.DECRYPT_MODE, key)
-        return cipher.doFinal(data)
-    }
+//    private fun encryptRSA(data: ByteArray, key: PublicKey): ByteArray {
+//        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+//        cipher.init(Cipher.ENCRYPT_MODE, key)
+//        return cipher.doFinal(data)
+//    }
+//
+//    private fun decryptRSA(data: ByteArray, key: PrivateKey): ByteArray {
+//        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+//        cipher.init(Cipher.DECRYPT_MODE, key)
+//        return cipher.doFinal(data)
+//    }
 }
